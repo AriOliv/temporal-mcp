@@ -155,9 +155,60 @@ class TemporalMCPServer:
             return format_error_response(e, name)
 
     async def run(self):
-        """Run the MCP server."""
+        """Run the MCP server over stdio (the MCP standard for local use)."""
         try:
             async with stdio_server() as (read_stream, write_stream):
                 await self.server.run(read_stream, write_stream, self.server.create_initialization_options())
         finally:
             await self.client_manager.disconnect()
+
+    async def run_http(self, host: str = "0.0.0.0", port: int = 8000, path: str = "/mcp"):
+        """Run the MCP server over native streamable HTTP (no stdio bridge).
+
+        Serves one long-lived process (stateless streamable HTTP + JSON responses)
+        so there is no per-request child spawning; the Temporal client stays cached
+        in the client manager across requests. Also exposes GET /healthz.
+        """
+        import contextlib
+
+        import uvicorn
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Mount, Route
+
+        session_manager = StreamableHTTPSessionManager(
+            app=self.server,
+            json_response=True,
+            stateless=True,
+        )
+
+        async def handle_mcp(scope, receive, send):
+            await session_manager.handle_request(scope, receive, send)
+
+        async def healthz(_request):
+            return JSONResponse({"status": "ok"})
+
+        @contextlib.asynccontextmanager
+        async def lifespan(_app):
+            async with session_manager.run():
+                try:
+                    yield
+                finally:
+                    await self.client_manager.disconnect()
+
+        # Health route first, then the MCP session manager as a catch-all so the
+        # endpoint (e.g. /mcp) is served directly with no trailing-slash 307
+        # redirect (Starlette's Mount("/mcp") would redirect /mcp -> /mcp/, which
+        # MCP clients that POST to /mcp don't follow). The session manager keys off
+        # the request body/headers, not the path.
+        app = Starlette(
+            debug=False,
+            routes=[
+                Route("/healthz", healthz, methods=["GET"]),
+                Mount("/", app=handle_mcp),
+            ],
+            lifespan=lifespan,
+        )
+        config = uvicorn.Config(app, host=host, port=port, log_level="info", access_log=False)
+        await uvicorn.Server(config).serve()

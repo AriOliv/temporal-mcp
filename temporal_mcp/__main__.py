@@ -63,6 +63,15 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="API key for Temporal Cloud authentication (env: TEMPORAL_API_KEY)",
     )
+    parser.add_argument(
+        "--transport",
+        metavar="MODE",
+        default=None,
+        choices=["stdio", "http"],
+        type=str.lower,
+        help="Transport: 'stdio' (default) or 'http' (native streamable HTTP) "
+        "(env: MCP_TRANSPORT; HTTP also reads MCP_HOST/PORT/MCP_PATH)",
+    )
     return parser.parse_args()
 
 
@@ -109,7 +118,16 @@ def main():
         tls_client_key_path=tls_client_key_path,
         api_key=api_key,
     )
-    asyncio.run(server.run())
+
+    transport = (args.transport or os.environ.get("MCP_TRANSPORT", "stdio")).lower()
+    if transport == "http":
+        host = os.environ.get("MCP_HOST", "0.0.0.0")
+        port = int(os.environ.get("PORT", "8000"))
+        path = os.environ.get("MCP_PATH", "/mcp")
+        print(f"Serving MCP over streamable HTTP on {host}:{port}{path}", file=sys.stderr)
+        asyncio.run(server.run_http(host=host, port=port, path=path))
+    else:
+        asyncio.run(server.run())
 
 
 if __name__ == "__main__":
