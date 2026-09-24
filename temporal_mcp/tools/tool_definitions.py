@@ -113,6 +113,18 @@ def get_all_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="get_workflow_failure",
+            description="Return failure details for a workflow execution: overall status, the workflow-level failure (message, source, stack trace, typed cause chain) and each failed activity (type, id, retry state, failure). Read-only; use to debug why a workflow FAILED.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "workflow_id": {"type": "string", "description": "The workflow execution ID"},
+                    "run_id": {"type": "string", "description": "Optional run ID for the workflow execution; omit to target the latest run"},
+                },
+                "required": ["workflow_id"],
+            },
+        ),
+        Tool(
             name="start_activity",
             description="Start a new standalone Temporal activity execution",
             input_schema={

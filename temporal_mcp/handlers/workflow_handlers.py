@@ -394,6 +394,82 @@ def _failure_to_metadata(failure: Failure) -> dict[str, Any]:
     return result
 
 
+async def get_workflow_failure(client: Client, args: dict) -> list[TextContent]:
+    """Return failure details for a workflow execution.
+
+    Walks the workflow history and extracts the overall status, the
+    workflow-level failure (message, source, stack trace, typed cause chain) and
+    each failed activity (type, id, retry state, failure). Read-only; use to
+    debug why a workflow FAILED.
+
+    Args:
+        client: Connected Temporal client
+        args: Arguments containing workflow_id and optional run_id
+
+    Returns:
+        Failure summary for the workflow execution
+    """
+    workflow_id = args["workflow_id"]
+    run_id = args.get("run_id")
+
+    handle = client.get_workflow_handle(workflow_id, run_id=run_id)
+
+    scheduled_activities: dict[int, dict[str, Any]] = {}
+    workflow_type: str | None = None
+    status = "RUNNING_OR_UNKNOWN"
+    workflow_failure: dict[str, Any] | None = None
+    failed_activities: list[dict[str, Any]] = []
+    event_count = 0
+
+    async for event in handle.fetch_history_events():
+        event_count += 1
+        attributes_type = event.WhichOneof("attributes")
+        if attributes_type == "workflow_execution_started_event_attributes":
+            workflow_type = event.workflow_execution_started_event_attributes.workflow_type.name
+        elif attributes_type == "activity_task_scheduled_event_attributes":
+            attrs = event.activity_task_scheduled_event_attributes
+            scheduled_activities[event.event_id] = {
+                "activity_id": attrs.activity_id,
+                "activity_type": attrs.activity_type.name,
+            }
+        elif attributes_type == "activity_task_failed_event_attributes":
+            attrs = event.activity_task_failed_event_attributes
+            info = scheduled_activities.get(attrs.scheduled_event_id, {})
+            failed_activities.append(
+                {
+                    "activity_type": info.get("activity_type"),
+                    "activity_id": info.get("activity_id"),
+                    "scheduled_event_id": attrs.scheduled_event_id,
+                    "retry_state": attrs.retry_state,
+                    "retry_state_name": _enum_name(RetryState, attrs.retry_state),
+                    "failure": _failure_to_metadata(attrs.failure) if attrs.HasField("failure") else None,
+                }
+            )
+        elif attributes_type == "workflow_execution_failed_event_attributes":
+            status = "FAILED"
+            attrs = event.workflow_execution_failed_event_attributes
+            workflow_failure = _failure_to_metadata(attrs.failure) if attrs.HasField("failure") else None
+        elif attributes_type == "workflow_execution_completed_event_attributes":
+            status = "COMPLETED"
+        elif attributes_type == "workflow_execution_timed_out_event_attributes":
+            status = "TIMED_OUT"
+        elif attributes_type == "workflow_execution_terminated_event_attributes":
+            status = "TERMINATED"
+        elif attributes_type == "workflow_execution_canceled_event_attributes":
+            status = "CANCELED"
+
+    result = {
+        "workflow_id": workflow_id,
+        "run_id": run_id,
+        "workflow_type": workflow_type,
+        "status": status,
+        "workflow_failure": workflow_failure,
+        "failed_activities": failed_activities,
+        "event_count": event_count,
+    }
+    return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+
 async def get_workflow_event(client: Client, args: dict) -> list[TextContent]:
     """Get a single workflow history event with decoded payload fields.
 

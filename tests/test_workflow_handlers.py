@@ -15,6 +15,8 @@ from temporalio.api.history.v1 import (
     ChildWorkflowExecutionFailedEventAttributes,
     HistoryEvent,
     StartChildWorkflowExecutionInitiatedEventAttributes,
+    WorkflowExecutionCompletedEventAttributes,
+    WorkflowExecutionFailedEventAttributes,
     WorkflowExecutionStartedEventAttributes,
 )
 from temporalio.converter import default
@@ -428,3 +430,119 @@ def _history_event(event_id, event_type, **attributes):
 class _FailingDataConverter:
     async def decode(self, payloads):
         raise ValueError("bad payload")
+
+
+class TestGetWorkflowFailure:
+    @pytest.mark.asyncio
+    async def test_get_workflow_failure_reports_wf_and_activity_failures(self, mock_client):
+        started = _history_event(
+            event_id=1,
+            event_type=EventType.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED,
+            workflow_execution_started_event_attributes=WorkflowExecutionStartedEventAttributes(
+                workflow_type=WorkflowType(name="RunContabilidadeWorkflow"),
+            ),
+        )
+        scheduled = _history_event(
+            event_id=8,
+            event_type=EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED,
+            activity_task_scheduled_event_attributes=ActivityTaskScheduledEventAttributes(
+                activity_id="fetch-trades-abc",
+                activity_type=ActivityType(name="fetch-trades"),
+            ),
+        )
+        act_failed = _history_event(
+            event_id=12,
+            event_type=EventType.EVENT_TYPE_ACTIVITY_TASK_FAILED,
+            activity_task_failed_event_attributes=ActivityTaskFailedEventAttributes(
+                scheduled_event_id=8,
+                retry_state=RetryState.RETRY_STATE_MAXIMUM_ATTEMPTS_REACHED,
+                failure=Failure(
+                    message="activity boom",
+                    source="PythonSDK",
+                    stack_trace="trace",
+                    application_failure_info=ApplicationFailureInfo(type="ValueError", non_retryable=True),
+                    cause=Failure(message="root cause"),
+                ),
+            ),
+        )
+        wf_failed = _history_event(
+            event_id=13,
+            event_type=EventType.EVENT_TYPE_WORKFLOW_EXECUTION_FAILED,
+            workflow_execution_failed_event_attributes=WorkflowExecutionFailedEventAttributes(
+                failure=Failure(message="workflow failed", source="PythonSDK"),
+            ),
+        )
+
+        async def mock_fetch_history_events():
+            for event in [started, scheduled, act_failed, wf_failed]:
+                yield event
+
+        mock_handle = AsyncMock()
+        mock_handle.fetch_history_events = mock_fetch_history_events
+        mock_client.get_workflow_handle = MagicMock(return_value=mock_handle)
+
+        result = await workflow_handlers.get_workflow_failure(mock_client, {"workflow_id": "wf-123"})
+        response = json.loads(result[0].text)
+
+        assert response["workflow_id"] == "wf-123"
+        assert response["workflow_type"] == "RunContabilidadeWorkflow"
+        assert response["status"] == "FAILED"
+        assert response["event_count"] == 4
+        assert response["workflow_failure"]["message"] == "workflow failed"
+        assert len(response["failed_activities"]) == 1
+        fa = response["failed_activities"][0]
+        assert fa["activity_type"] == "fetch-trades"
+        assert fa["activity_id"] == "fetch-trades-abc"
+        assert fa["retry_state_name"] == "RETRY_STATE_MAXIMUM_ATTEMPTS_REACHED"
+        assert fa["failure"]["message"] == "activity boom"
+        assert fa["failure"]["application_failure"] == {"type": "ValueError", "non_retryable": True}
+        assert fa["failure"]["cause"]["message"] == "root cause"
+
+    @pytest.mark.asyncio
+    async def test_get_workflow_failure_completed_has_no_failures(self, mock_client):
+        started = _history_event(
+            event_id=1,
+            event_type=EventType.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED,
+            workflow_execution_started_event_attributes=WorkflowExecutionStartedEventAttributes(
+                workflow_type=WorkflowType(name="RunTransacoesWorkflow"),
+            ),
+        )
+        completed = _history_event(
+            event_id=2,
+            event_type=EventType.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED,
+            workflow_execution_completed_event_attributes=WorkflowExecutionCompletedEventAttributes(),
+        )
+
+        async def mock_fetch_history_events():
+            for event in [started, completed]:
+                yield event
+
+        mock_handle = AsyncMock()
+        mock_handle.fetch_history_events = mock_fetch_history_events
+        mock_client.get_workflow_handle = MagicMock(return_value=mock_handle)
+
+        result = await workflow_handlers.get_workflow_failure(mock_client, {"workflow_id": "wf-ok"})
+        response = json.loads(result[0].text)
+
+        assert response["status"] == "COMPLETED"
+        assert response["workflow_failure"] is None
+        assert response["failed_activities"] == []
+        assert response["workflow_type"] == "RunTransacoesWorkflow"
+
+    @pytest.mark.asyncio
+    async def test_get_workflow_failure_passes_run_id(self, mock_client):
+        async def mock_fetch_history_events():
+            if False:
+                yield None
+
+        mock_handle = AsyncMock()
+        mock_handle.fetch_history_events = mock_fetch_history_events
+        mock_client.get_workflow_handle = MagicMock(return_value=mock_handle)
+
+        result = await workflow_handlers.get_workflow_failure(mock_client, {"workflow_id": "wf-x", "run_id": "run-9"})
+        response = json.loads(result[0].text)
+
+        mock_client.get_workflow_handle.assert_called_once_with("wf-x", run_id="run-9")
+        assert response["run_id"] == "run-9"
+        assert response["status"] == "RUNNING_OR_UNKNOWN"
+        assert response["event_count"] == 0
