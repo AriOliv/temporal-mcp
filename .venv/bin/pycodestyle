@@ -1,0 +1,6 @@
+#!/private/tmp/claude-501/-Users-arioliveira-Aol-studio/8d769b1f-a32a-4271-be59-6a56f6b6c1b1/scratchpad/temporal-mcp/.venv/bin/python3.11
+import sys
+from pycodestyle import _main
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(_main())

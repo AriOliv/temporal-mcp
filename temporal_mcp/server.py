@@ -93,6 +93,8 @@ class TemporalMCPServer:
                 return await workflow_handlers.get_workflow_history(client, arguments)
             elif name == "get_workflow_event":
                 return await workflow_handlers.get_workflow_event(client, arguments)
+            elif name == "get_workflow_failure":
+                return await workflow_handlers.get_workflow_failure(client, arguments)
 
             # Standalone activity operations
             elif name == "start_activity":
